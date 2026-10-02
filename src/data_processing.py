@@ -105,8 +105,9 @@ def _validate_land_registry_sample_values(sample_row) -> bool:
 
 def detect_and_adapt_dataset(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict, Dict, List[str]]:
     """
-    High-Performance Dataset Adapter Layer with PyArrow & Vectorized Optimizations.
-    Detects dataset types, maps columns, cleans prices, and extracts capabilities without fabricating data.
+    Universal High-Performance Dataset Adapter.
+    Detects dataset types (HM Land Registry, Custom Area CSVs, Arbitrary CSVs with fuzzy header matching),
+    maps columns, cleans non-positive prices, and extracts capabilities without fabricating data.
     """
     messages = []
     initial_rows = len(df)
@@ -127,11 +128,11 @@ def detect_and_adapt_dataset(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict, Dict
         }
         return pd.DataFrame(), caps, {"initial_rows": 0, "cleaned_rows": 0, "removed_rows": 0}, ["Uploaded dataset is empty."]
 
-    # Step A: Check normalized column names first
+    # Step A: Check normalized column names first for HM Land Registry
     col_str_joined = " ".join([str(c).lower() for c in df.columns])
     is_lr_named = any(k in col_str_joined for k in ["transaction unique identifier", "date of transfer", "paon", "ppd category"])
 
-    # Step B: If positional, validate representative sample values
+    # Step B: If positional, validate representative sample values for HM Land Registry
     is_lr_headerless = False
     if not is_lr_named and len(df.columns) == 16:
         row_0_vals = list(df.columns)
@@ -164,7 +165,6 @@ def detect_and_adapt_dataset(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict, Dict
             renames = {col: lr_map[str(col).strip().lower()] for col in df_working.columns if str(col).strip().lower() in lr_map}
             df_working = df_working.rename(columns=renames)
 
-        # Ultra-fast vectorized dictionary construction
         adapted_dict = {}
         adapted_dict["property_id"] = df_working["transaction_id"].astype(str).str.strip("{} ")
         
@@ -189,7 +189,6 @@ def detect_and_adapt_dataset(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict, Dict
         if "postcode" in df_working.columns:
             adapted_dict["postcode"] = df_working["postcode"].astype(str).str.strip()
             
-        # Fast vectorized urban zone selection (District -> Town/City -> County)
         dist = df_working["district"].astype(str).str.strip() if "district" in df_working.columns else pd.Series([""] * len(df_working))
         town = df_working["town_city"].astype(str).str.strip() if "town_city" in df_working.columns else pd.Series([""] * len(df_working))
         county = df_working["county"].astype(str).str.strip() if "county" in df_working.columns else pd.Series([""] * len(df_working))
@@ -203,7 +202,6 @@ def detect_and_adapt_dataset(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict, Dict
 
         df_adapted = pd.DataFrame(adapted_dict)
 
-        # Clean valid rows
         valid_mask = (df_adapted["price"] > 0) & df_adapted["urban_zone"].notna()
         df_clean = df_adapted[valid_mask].copy()
         
@@ -214,7 +212,7 @@ def detect_and_adapt_dataset(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict, Dict
             "dataset_name": "HM Land Registry Price Paid Data",
             "analysis_mode": "TRANSACTION_PRICE",
             "has_price": True,
-            "has_area": False, # STRICTLY FALSE
+            "has_area": False,
             "has_property_type": True,
             "has_location": True,
             "has_transaction_date": True,
@@ -236,67 +234,118 @@ def detect_and_adapt_dataset(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict, Dict
         }
         return df_clean, caps, stats_meta, messages
 
-    # Step C: Standard Custom / Property Pulse Dataset (with or without Area)
+    # Step C: Universal Custom CSV Fuzzy Adapter (Accepts ANY CSV File!)
     df_clean = df.copy()
-    df_clean.columns = [str(c).strip().lower() for c in df_clean.columns]
-    
-    col_mapping = {
-        "urban_zone": "urban_zone", "zone": "urban_zone", "location": "urban_zone", "district": "urban_zone", "city": "urban_zone",
-        "area_sqft": "area_sqft", "area": "area_sqft", "sqft": "area_sqft", "size_sqft": "area_sqft", "size": "area_sqft",
-        "price": "price", "cost": "price", "amount": "price", "value": "price",
-        "property_id": "property_id", "id": "property_id", "transaction_id": "property_id",
-        "property_type": "property_type", "type": "property_type",
-        "bedrooms": "bedrooms", "beds": "bedrooms", "bhk": "bedrooms",
-        "bathrooms": "bathrooms", "baths": "bathrooms",
-        "date": "transaction_date", "transaction_date": "transaction_date"
-    }
-    
-    df_clean = df_clean.rename(columns={c: col_mapping[c] for c in df_clean.columns if c in col_mapping})
-    
+    lower_cols = [str(c).strip().lower() for c in df_clean.columns]
+    raw_col_map = dict(zip(df_clean.columns, lower_cols))
+    df_clean = df_clean.rename(columns=raw_col_map)
+
+    target_price_col = None
+    target_zone_col = None
+    target_area_col = None
+    target_type_col = None
+    target_id_col = None
+
+    # 1. Fuzzy Price Search
+    for col in df_clean.columns:
+        if any(k in col for k in ["price", "cost", "val", "amt", "amount", "paid", "sale", "worth", "rate", "inr", "gbp", "usd", "eur"]):
+            target_price_col = col
+            break
+
+    # Fallback Price: Choose numerical column with largest mean
+    if target_price_col is None:
+        num_cols = df_clean.select_dtypes(include=[np.number]).columns
+        if len(num_cols) > 0:
+            target_price_col = max(num_cols, key=lambda c: df_clean[c].mean())
+
+    # 2. Fuzzy Zone/Location Search
+    for col in df_clean.columns:
+        if col != target_price_col and any(k in col for k in ["zone", "district", "city", "town", "loc", "suburb", "region", "address", "postcode", "zip", "county", "state", "area_name", "neighborhood"]):
+            target_zone_col = col
+            break
+
+    # 3. Fuzzy Area Search
+    for col in df_clean.columns:
+        if col not in [target_price_col, target_zone_col] and any(k in col for k in ["sqft", "sq_ft", "sqm", "area", "size", "carpet", "builtup"]):
+            target_area_col = col
+            break
+
+    # 4. Fuzzy Property Type Search
+    for col in df_clean.columns:
+        if col not in [target_price_col, target_zone_col, target_area_col] and any(k in col for k in ["type", "cat", "style", "building", "kind"]):
+            target_type_col = col
+            break
+
+    # 5. Fuzzy ID Search
+    for col in df_clean.columns:
+        if any(k in col for k in ["id", "pid", "ref", "key", "code"]):
+            target_id_col = col
+            break
+
+    # Map discovered columns
+    renames = {}
+    if target_price_col: renames[target_price_col] = "price"
+    if target_zone_col: renames[target_zone_col] = "urban_zone"
+    if target_area_col: renames[target_area_col] = "area_sqft"
+    if target_type_col: renames[target_type_col] = "property_type"
+    if target_id_col: renames[target_id_col] = "property_id"
+
+    df_clean = df_clean.rename(columns=renames)
+
     if "price" not in df_clean.columns:
         return pd.DataFrame(), {}, {"initial_rows": initial_rows, "cleaned_rows": 0, "removed_rows": initial_rows}, [
-            "Missing required column: 'price'. Please upload a dataset containing price information."
+            "Unable to auto-detect a numeric Price column in the uploaded CSV. Please ensure dataset contains a numerical price column."
         ]
-        
+
     if "urban_zone" not in df_clean.columns:
         df_clean["urban_zone"] = "All Properties"
-        messages.append("Location column missing; defaulted to 'All Properties'.")
+        messages.append("Location/Zone column not specified; defaulted to 'All Properties'.")
 
-    # Determine Area availability
     has_area = "area_sqft" in df_clean.columns
     if has_area:
         df_clean["area_sqft"] = pd.to_numeric(df_clean["area_sqft"], errors="coerce")
         valid_mask = (pd.to_numeric(df_clean["price"], errors="coerce") > 0) & (df_clean["area_sqft"] > 0)
     else:
         valid_mask = pd.to_numeric(df_clean["price"], errors="coerce") > 0
-        
+
     df_clean["price"] = pd.to_numeric(df_clean["price"], errors="coerce")
     df_clean = df_clean[valid_mask].copy()
-    
+
     if "property_id" not in df_clean.columns:
         df_clean["property_id"] = [f"P{1000 + i + 1}" for i in range(len(df_clean))]
     else:
         df_clean["property_id"] = df_clean["property_id"].astype(str)
-        
+
     if "property_type" not in df_clean.columns:
         df_clean["property_type"] = "Standard"
-        
+
     df_clean["urban_zone"] = df_clean["urban_zone"].astype(str).str.strip().astype("category")
-    
+
+    # Dynamic Currency Symbol Detection
+    col_headers_str = " ".join(df.columns).lower()
+    if any(c in col_headers_str for c in ["£", "gbp", "uk"]):
+        curr_sym = "£"
+    elif any(c in col_headers_str for c in ["$", "usd", "dollar"]):
+        curr_sym = "$"
+    elif any(c in col_headers_str for c in ["€", "eur", "euro"]):
+        curr_sym = "€"
+    else:
+        curr_sym = "₹"
+
     analysis_mode = "AREA_BASED" if has_area else "TRANSACTION_PRICE"
-    dataset_name = "Property Pulse Custom Dataset" if has_area else "Generic Transaction Dataset"
-    
+    dataset_name = "Auto-Adapted Real Estate Dataset" if has_area else "Generic Transaction Dataset"
+
     avail_feats = ["Transaction Price", "Urban Zone"]
     unavail_feats = []
-    
+
     if has_area:
         avail_feats.extend(["Property Area (sq.ft)", "Price per Sq.Ft.", "Area-adjusted Expected Price"])
     else:
         unavail_feats.extend(["Property Area (sq.ft)", "Price per Sq.Ft.", "Area-adjusted Expected Price"])
-        
+
     if "property_type" in df_clean.columns and df_clean["property_type"].nunique() > 1:
         avail_feats.append("Property Type")
-        
+
     caps = {
         "dataset_name": dataset_name,
         "analysis_mode": analysis_mode,
@@ -306,20 +355,20 @@ def detect_and_adapt_dataset(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict, Dict
         "has_location": True,
         "has_transaction_date": "transaction_date" in df_clean.columns,
         "has_postcode": "postcode" in df_clean.columns,
-        "currency_symbol": "₹",
+        "currency_symbol": curr_sym,
         "available_features": avail_feats,
         "unavailable_features": unavail_feats
     }
-    
+
     cleaned_rows = len(df_clean)
     removed_rows = initial_rows - cleaned_rows
-    
+
     stats_meta = {
         "initial_rows": initial_rows,
         "cleaned_rows": cleaned_rows,
         "removed_rows": removed_rows
     }
-    
+
     return df_clean, caps, stats_meta, messages
 
 

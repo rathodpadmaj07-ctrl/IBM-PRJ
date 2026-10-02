@@ -365,13 +365,29 @@ st.markdown("""
 @st.cache_data(show_spinner="Analyzing real estate dataset...")
 def _cached_load_data(file_bytes_or_path, is_uploaded_bytes: bool = False):
     """
-    Cached dataset reader & adapter for fast loading of 160MB+ files.
+    Cached dataset reader & adapter with PyArrow acceleration for fast loading of 160MB+ files.
     """
-    if is_uploaded_bytes:
-        raw_df = pd.read_csv(io.BytesIO(file_bytes_or_path))
-    else:
-        raw_df = pd.read_csv(file_bytes_or_path)
+    try:
+        if is_uploaded_bytes:
+            raw_df = pd.read_csv(io.BytesIO(file_bytes_or_path), engine="pyarrow")
+        else:
+            raw_df = pd.read_csv(file_bytes_or_path, engine="pyarrow")
+    except Exception:
+        if is_uploaded_bytes:
+            raw_df = pd.read_csv(io.BytesIO(file_bytes_or_path))
+        else:
+            raw_df = pd.read_csv(file_bytes_or_path)
+            
     return detect_and_adapt_dataset(raw_df)
+
+
+@st.cache_data(show_spinner="Executing statistical outlier engine...")
+def _cached_statistical_pipeline(df_clean_data: pd.DataFrame, alpha_val: float, min_obs_val: int, has_area_flag: bool):
+    """
+    Cached statistical computation engine. Prevents re-running calculations on tab/filter UI events.
+    """
+    df_processed = calculate_expected_prices(df_clean_data, has_area=has_area_flag)
+    return analyze_and_classify_properties(df_processed, alpha=alpha_val, min_obs=min_obs_val, has_area=has_area_flag)
 
 
 def load_data(data_source: str, uploaded_file=None) -> Tuple[pd.DataFrame, Dict, Dict, List[str]]:
@@ -420,8 +436,8 @@ def main():
             st.markdown('''
             <div style="background-color: var(--bg-card); border:1px solid var(--border-color); border-radius:6px; padding:10px; margin-bottom:10px;">
                 <div style="font-weight:700; font-size:0.85rem; color:var(--text-primary);">Upload Dataset</div>
-                <div style="font-size:0.75rem; color:var(--text-secondary); margin-top:2px;">Supports custom CSV files & HM Land Registry (pp-2025.csv)</div>
-                <div style="font-size:0.75rem; color:var(--text-secondary); margin-top:4px;"><b>Auto-detects:</b> Schema, Price, Zone & Area presence</div>
+                <div style="font-size:0.75rem; color:var(--text-secondary); margin-top:2px;">Supports ALL CSV formats & HM Land Registry (pp-2025.csv)</div>
+                <div style="font-size:0.75rem; color:var(--text-secondary); margin-top:4px;"><b>Auto-detects:</b> Universal columns, Price, Zone & Area</div>
             </div>
             ''', unsafe_allow_html=True)
             uploaded_file = st.file_uploader("Choose CSV File", type=["csv"], label_visibility="collapsed")
@@ -468,9 +484,8 @@ def main():
 
         st.markdown("<br><hr style='border-color: var(--border-color);'><div style='font-size:0.7rem; color:var(--text-secondary); text-align:center;'>Statistical Real Estate Analysis Engine</div>", unsafe_allow_html=True)
 
-    # ------------------- CORE STATISTICAL COMPUTATION -------------------
-    df_processed = calculate_expected_prices(df_clean, has_area=has_area)
-    df_classified = analyze_and_classify_properties(df_processed, alpha=alpha, min_obs=min_obs, has_area=has_area)
+    # ------------------- CORE CACHED STATISTICAL COMPUTATION -------------------
+    df_classified = _cached_statistical_pipeline(df_clean, alpha, min_obs, has_area)
 
     # Active dataset filtering based on scope
     active_df = df_classified.copy()
@@ -738,24 +753,30 @@ def main():
             
         explorer_df = explorer_df.sort_values(by=sort_by, ascending=False)
         
+        # High-speed data table pagination / preview limit (top 1000) for lag-free UI
+        preview_exp = explorer_df.head(1000)
+        
         disp_exp = pd.DataFrame()
-        disp_exp["Property ID"] = explorer_df["property_id"]
-        disp_exp["Urban Zone"] = explorer_df["urban_zone"]
-        disp_exp["Property Type"] = explorer_df["property_type"]
+        disp_exp["Property ID"] = preview_exp["property_id"]
+        disp_exp["Urban Zone"] = preview_exp["urban_zone"]
+        disp_exp["Property Type"] = preview_exp["property_type"]
         
         if has_area:
-            disp_exp["Area (sq.ft)"] = explorer_df["area_sqft"].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A")
-            disp_exp["Price / Sqft"] = explorer_df["price_per_sqft"].apply(lambda x: f"{currency_sym}{x:,.1f}" if pd.notna(x) else "N/A")
+            disp_exp["Area (sq.ft)"] = preview_exp["area_sqft"].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A")
+            disp_exp["Price / Sqft"] = preview_exp["price_per_sqft"].apply(lambda x: f"{currency_sym}{x:,.1f}" if pd.notna(x) else "N/A")
             
-        disp_exp["Actual Price"] = explorer_df["price"].apply(lambda x: format_currency_inr(x, currency_symbol=currency_sym))
+        disp_exp["Actual Price"] = preview_exp["price"].apply(lambda x: format_currency_inr(x, currency_symbol=currency_sym))
         
-        if "postcode" in explorer_df.columns:
-            disp_exp["Postcode"] = explorer_df["postcode"]
-        if "transaction_date" in explorer_df.columns:
-            disp_exp["Date"] = explorer_df["transaction_date"].dt.strftime("%Y-%m-%d")
+        if "postcode" in preview_exp.columns:
+            disp_exp["Postcode"] = preview_exp["postcode"]
+        if "transaction_date" in preview_exp.columns:
+            disp_exp["Date"] = preview_exp["transaction_date"].dt.strftime("%Y-%m-%d")
             
-        disp_exp["Classification"] = explorer_df["Classification"]
+        disp_exp["Classification"] = preview_exp["Classification"]
         
+        if len(explorer_df) > 1000:
+            st.caption(f"⚡ Showing top 1,000 properties out of {len(explorer_df):,} in UI for maximum speed. Filter or search to view specific rows, or use CSV export for full dataset.")
+            
         st.dataframe(disp_exp, use_container_width=True, hide_index=True)
 
     # ==========================================
@@ -785,7 +806,7 @@ def main():
 
             st.markdown("<br>", unsafe_allow_html=True)
             
-            disp_zone = zone_summary.copy()
+            disp_zone = zone_summary.head(1000).copy()
             disp_zone["Mean Price"] = disp_zone["Mean Price"].apply(lambda x: format_currency_inr(x, currency_symbol=currency_sym))
             disp_zone["Median Price"] = disp_zone["Median Price"].apply(lambda x: format_currency_inr(x, currency_symbol=currency_sym))
             disp_zone["Std Dev Price"] = disp_zone["Std Dev Price"].apply(lambda x: format_currency_inr(x, currency_symbol=currency_sym))
@@ -832,21 +853,26 @@ def main():
             sq = outlier_search.strip().lower()
             outlier_table_df = outlier_table_df[outlier_table_df["property_id"].astype(str).str.lower().str.contains(sq)]
 
+        preview_outliers = outlier_table_df.head(1000)
+
         disp_outliers = pd.DataFrame()
-        disp_outliers["Property ID"] = outlier_table_df["property_id"]
-        disp_outliers["Urban Zone"] = outlier_table_df["urban_zone"]
-        disp_outliers["Property Type"] = outlier_table_df["property_type"]
+        disp_outliers["Property ID"] = preview_outliers["property_id"]
+        disp_outliers["Urban Zone"] = preview_outliers["urban_zone"]
+        disp_outliers["Property Type"] = preview_outliers["property_type"]
         
         if has_area:
-            disp_outliers["Area (sq.ft)"] = outlier_table_df["area_sqft"].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A")
+            disp_outliers["Area (sq.ft)"] = preview_outliers["area_sqft"].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A")
             
-        disp_outliers["Actual Price"] = outlier_table_df["Actual Price"].apply(lambda x: format_currency_inr(x, currency_symbol=currency_sym))
-        disp_outliers["Expected Price"] = outlier_table_df["Expected Price"].apply(lambda x: format_currency_inr(x, currency_symbol=currency_sym))
-        disp_outliers["Price Difference"] = outlier_table_df["Price Difference"].apply(lambda x: format_currency_inr(x, is_difference=True, currency_symbol=currency_sym))
-        disp_outliers["Price Difference (%)"] = outlier_table_df["Price Difference (%)"].apply(lambda x: f"{x:+.1f}%")
-        disp_outliers["Grubbs Result"] = outlier_table_df["grubbs_result"]
-        disp_outliers["IQR Result"] = outlier_table_df["iqr_result"]
-        disp_outliers["Classification"] = outlier_table_df["Classification"]
+        disp_outliers["Actual Price"] = preview_outliers["Actual Price"].apply(lambda x: format_currency_inr(x, currency_symbol=currency_sym))
+        disp_outliers["Expected Price"] = preview_outliers["Expected Price"].apply(lambda x: format_currency_inr(x, currency_symbol=currency_sym))
+        disp_outliers["Price Difference"] = preview_outliers["Price Difference"].apply(lambda x: format_currency_inr(x, is_difference=True, currency_symbol=currency_sym))
+        disp_outliers["Price Difference (%)"] = preview_outliers["Price Difference (%)"].apply(lambda x: f"{x:+.1f}%")
+        disp_outliers["Grubbs Result"] = preview_outliers["grubbs_result"]
+        disp_outliers["IQR Result"] = preview_outliers["iqr_result"]
+        disp_outliers["Classification"] = preview_outliers["Classification"]
+
+        if len(outlier_table_df) > 1000:
+            st.caption(f"⚡ Showing top 1,000 outliers out of {len(outlier_table_df):,} in UI table. Use search or Download CSV for full list.")
 
         st.dataframe(disp_outliers, use_container_width=True, hide_index=True)
 
@@ -860,7 +886,7 @@ def main():
         st.markdown("##### PROPERTY INVESTIGATION")
 
         prop_list = active_df["property_id"].astype(str).tolist()
-        selected_pid = st.selectbox("SELECT PROPERTY:", prop_list, index=0)
+        selected_pid = st.selectbox("SELECT PROPERTY:", prop_list[:2000], index=0)
 
         prop_data = active_df[active_df["property_id"].astype(str) == selected_pid].iloc[0]
 

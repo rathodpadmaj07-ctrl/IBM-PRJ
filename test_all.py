@@ -39,7 +39,7 @@ def test_dataset(file_path, label):
     except Exception:
         df_raw = pd.read_csv(file_path)
     t_read = time.time() - t_start
-    print_flush(f"[OK] Read CSV (PyArrow/C Engine): {len(df_raw):,} rows, {len(df_raw.columns)} cols in {t_read:.3f}s")
+    print_flush(f"[OK] Read CSV: {len(df_raw):,} rows, {len(df_raw.columns)} cols in {t_read:.3f}s")
     
     # 1. Dataset Detection & Adaptation
     t_adapt_start = time.time()
@@ -119,6 +119,7 @@ if __name__ == "__main__":
     
     test_dataset("data/sample_real_estate.csv", "Sample Real Estate Dataset (Area-Based)")
     test_dataset("data/custom_area_sample.csv", "Custom Area-Based Dataset")
+    test_dataset("data/random_arbitrary_dataset.csv", "Arbitrary Random CSV (Fuzzy Auto-Adapter)")
     
     lr_file = r"C:\Users\Padmaj Rathod\Downloads\pp-2025.csv"
     if os.path.exists(lr_file):
