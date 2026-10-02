@@ -34,9 +34,12 @@ def test_dataset(file_path, label):
         return False
         
     t_start = time.time()
-    df_raw = pd.read_csv(file_path)
+    try:
+        df_raw = pd.read_csv(file_path, engine="pyarrow")
+    except Exception:
+        df_raw = pd.read_csv(file_path)
     t_read = time.time() - t_start
-    print_flush(f"[OK] Read CSV: {len(df_raw):,} rows, {len(df_raw.columns)} cols in {t_read:.3f}s")
+    print_flush(f"[OK] Read CSV (PyArrow/C Engine): {len(df_raw):,} rows, {len(df_raw.columns)} cols in {t_read:.3f}s")
     
     # 1. Dataset Detection & Adaptation
     t_adapt_start = time.time()

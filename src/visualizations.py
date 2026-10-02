@@ -40,20 +40,38 @@ def _apply_dark_style(fig, xaxis_title="", yaxis_title="", height=450):
     )
     return fig
 
+def _sample_for_plotting(df: pd.DataFrame, max_normals: int = 5000) -> pd.DataFrame:
+    """
+    Ultra-fast plotting sampler:
+    Retains 100% of statistical outliers and samples normal properties to prevent UI lag on 1M+ rows.
+    """
+    if len(df) <= max_normals * 2:
+        return df
+        
+    outliers = df[df["Classification"] != "Normal"]
+    normals = df[df["Classification"] == "Normal"]
+    
+    if len(normals) > max_normals:
+        normals = normals.sample(n=max_normals, random_state=42)
+        
+    return pd.concat([outliers, normals]).sort_index()
+
+
 def plot_price_distribution(df: pd.DataFrame, selected_zone: str = "All Urban Zones", currency_symbol: str = "₹"):
     """
     Clean histogram of property prices with Mean and Median reference lines.
     """
+    df_plot = _sample_for_plotting(df)
     title_text = "Property Price Distribution" if selected_zone == "All Urban Zones" else f"Property Price Distribution — {selected_zone}"
     
     hover_opts = ["property_id", "urban_zone"]
-    if "property_type" in df.columns:
+    if "property_type" in df_plot.columns:
         hover_opts.append("property_type")
-    if "area_sqft" in df.columns:
+    if "area_sqft" in df_plot.columns:
         hover_opts.append("area_sqft")
 
     fig = px.histogram(
-        df,
+        df_plot,
         x="price",
         color="urban_zone" if selected_zone == "All Urban Zones" else "Classification",
         color_discrete_map=COLOR_MAP if selected_zone != "All Urban Zones" else None,
@@ -95,14 +113,15 @@ def plot_box_plot_by_zone(df: pd.DataFrame, selected_zone: str = "All Urban Zone
     """
     Box plot showing price distribution and extreme observations per urban zone.
     """
+    df_plot = _sample_for_plotting(df)
     title_text = "Price Distribution & Outliers by Urban Zone" if selected_zone == "All Urban Zones" else f"Price Variance & Outliers — {selected_zone}"
     
     hover_cols = ["property_id"]
-    if "area_sqft" in df.columns:
+    if "area_sqft" in df_plot.columns:
         hover_cols.append("area_sqft")
         
     fig = px.box(
-        df,
+        df_plot,
         x="urban_zone" if selected_zone == "All Urban Zones" else "property_type",
         y="price",
         color="urban_zone" if selected_zone == "All Urban Zones" else "property_type",
@@ -123,7 +142,7 @@ def plot_price_vs_area(df: pd.DataFrame, selected_zone: str = "All Urban Zones",
     if "area_sqft" not in df.columns:
         return None
         
-    df_plot = df.copy()
+    df_plot = _sample_for_plotting(df).copy()
     title_text = "Property Price vs. Area (sq.ft)" if selected_zone == "All Urban Zones" else f"Property Price vs. Area (sq.ft) — {selected_zone}"
     
     df_plot["hover_actual_price"] = df_plot["Actual Price"].apply(lambda x: format_currency_inr(x, currency_symbol=currency_symbol))
@@ -176,15 +195,16 @@ def plot_price_per_sqft_distribution(df: pd.DataFrame, selected_zone: str = "All
     if "price_per_sqft" not in df.columns:
         return None
         
+    df_plot = _sample_for_plotting(df)
     title_text = "Price per Sq.Ft. by Urban Zone" if selected_zone == "All Urban Zones" else f"Price per Sq.Ft. — {selected_zone}"
     
     fig = px.violin(
-        df,
+        df_plot,
         x="urban_zone" if selected_zone == "All Urban Zones" else "property_type",
         y="price_per_sqft",
         color="urban_zone" if selected_zone == "All Urban Zones" else "property_type",
         box=True,
-        points="all",
+        points="outliers",
         title=f"<b>{title_text}</b>",
         labels={"price_per_sqft": f"Price / Sq.Ft ({currency_symbol})", "urban_zone": "Urban Zone", "property_type": "Property Type"},
         hover_data=["property_id", "price"],
@@ -196,7 +216,7 @@ def plot_price_per_sqft_distribution(df: pd.DataFrame, selected_zone: str = "All
 
 def plot_classification_breakdown(df: pd.DataFrame, selected_zone: str = "All Urban Zones"):
     """
-    Donut chart of Property Classification breakdown.
+    Donut chart of Property Classification breakdown across ALL properties.
     """
     title_text = "Property Classification Breakdown" if selected_zone == "All Urban Zones" else f"Classification — {selected_zone}"
     
@@ -223,7 +243,7 @@ def plot_classification_breakdown(df: pd.DataFrame, selected_zone: str = "All Ur
     )
     
     fig.add_annotation(
-        text=f"<b>{total_outliers}</b><br><span style='font-size:11px;color:#9AA7B5;'>Outliers</span>",
+        text=f"<b>{total_outliers:,}</b><br><span style='font-size:11px;color:#9AA7B5;'>Outliers</span>",
         x=0.5, y=0.5,
         font=dict(size=20, color="#F5F7FA"),
         showarrow=False
@@ -246,11 +266,9 @@ def plot_classification_breakdown(df: pd.DataFrame, selected_zone: str = "All Ur
 
 def plot_outlier_visualization(df: pd.DataFrame, selected_zone: str = "All Urban Zones", currency_symbol: str = "₹", has_area: bool = True):
     """
-    Scatter plot comparing Actual Price vs Expected Price.
-    - If has_area=True: Expected Price = Rate * Area
-    - If has_area=False: Expected Price = Zone Median Price
+    Scatter plot comparing Actual Price vs Expected Price. Retains 100% of outliers for perfect analytical visual map.
     """
-    df_plot = df.copy()
+    df_plot = _sample_for_plotting(df).copy()
     title_text = "Actual vs. Expected Price Outlier Map" if selected_zone == "All Urban Zones" else f"Actual vs. Expected Price Outlier Map — {selected_zone}"
     
     df_plot["hover_actual"] = df_plot["Actual Price"].apply(lambda x: format_currency_inr(x, currency_symbol=currency_symbol))
@@ -304,9 +322,7 @@ def plot_outlier_visualization(df: pd.DataFrame, selected_zone: str = "All Urban
 
 def plot_zone_comparison(df: pd.DataFrame, selected_zone: str = "All Urban Zones", currency_symbol: str = "₹", has_area: bool = True):
     """
-    Grouped bar chart comparing Median and Mean metrics by Urban Zone.
-    - If has_area=True: Compares Rate per Sq.Ft.
-    - If has_area=False: Compares Transaction Prices.
+    Grouped bar chart comparing Median and Mean metrics by Urban Zone across top zones.
     """
     title_text = "Price Metric Comparison by Urban Zone" if selected_zone == "All Urban Zones" else f"Rate Benchmark — {selected_zone}"
     
@@ -323,7 +339,6 @@ def plot_zone_comparison(df: pd.DataFrame, selected_zone: str = "All Urban Zones
         
     zone_stats = df.groupby("urban_zone", observed=True)[metric_col].agg(["mean", "median"]).reset_index()
     
-    # Take top 25 zones if there are too many (e.g. Land Registry with hundreds of districts)
     if len(zone_stats) > 25:
         zone_stats = zone_stats.sort_values(by="median", ascending=False).head(25)
         title_text += " (Top 25 Districts by Median)"
@@ -356,10 +371,11 @@ def plot_price_by_property_type(df: pd.DataFrame, selected_zone: str = "All Urba
     if "property_type" not in df.columns or df["property_type"].nunique() <= 1:
         return None
         
+    df_plot = _sample_for_plotting(df)
     title_text = "Price Distribution by Property Type" if selected_zone == "All Urban Zones" else f"Property Type Prices — {selected_zone}"
     
     fig = px.box(
-        df,
+        df_plot,
         x="property_type",
         y="price",
         color="property_type",
