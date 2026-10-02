@@ -1,0 +1,11 @@
+{
+  "name": "fsd-a3-onespace",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node OneSpace_Phase1/server/src/server.js",
+    "dev": "node OneSpace_Phase1/server/src/server.js",
+    "dev:onespace": "cd OneSpace_Phase1 && npm run dev"
+  }
+}
